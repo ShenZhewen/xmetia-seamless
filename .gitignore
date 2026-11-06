@@ -1,0 +1,42 @@
+# ── Python ──
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.env
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
+# ── Node / 前端 ──
+node_modules/
+dist/
+build/
+.vite/
+*.tsbuildinfo
+.env.local
+
+# ── 数据与产物（预报/观测数据体积大，不入库）──
+data/
+output/
+*.nc
+*.nc4
+*.zarr/
+*.grib
+*.grib2
+*.h5
+*.hdf5
+*.csv
+*.parquet
+!docs/**/*.csv
+
+# ── 系统 ──
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── 日志与临时文件 ──
+*.log
+tmp/
+.temp/

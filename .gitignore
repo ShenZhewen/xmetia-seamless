@@ -31,10 +31,12 @@ output/
 *.parquet
 !docs/**/*.csv
 
-# ── 系统 ──
+# ── 系统 / IDE ──
 .DS_Store
 Thumbs.db
 desktop.ini
+.idea/
+.vscode/
 
 # ── 日志与临时文件 ──
 *.log

@@ -1,0 +1,5 @@
+fastapi>=0.115
+uvicorn[standard]>=0.32
+xarray>=2024.10
+numpy>=1.26
+netCDF4>=1.6

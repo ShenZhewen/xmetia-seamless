@@ -50,10 +50,10 @@ function classGradient(cmap) {
     : cmap.gradientCss
 }
 
-export default function Legend({ variable }) {
+export default function Legend({ variable, palettes = null }) {
   if (!variable) return null
 
-  const cmap = createColormap(variable)
+  const cmap = createColormap(variable, palettes)
   const ticks = legendTicks(cmap)
   const last = ticks.length - 1
   const gradient = cmap.kind === 'classes' ? classGradient(cmap) : cmap.gradientCss

@@ -19,6 +19,9 @@ build/
 
 # ── 数据与产物（预报/观测数据体积大，不入库）──
 data/
+data_store/
+data_incoming/
+data_archive/
 output/
 *.nc
 *.nc4

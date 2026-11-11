@@ -38,6 +38,29 @@ export function fetchField({ model, init, variable, lead, stride = 4, bbox }) {
   return getJSON(`${BASE}/field?${query}`)
 }
 
+// 后端色块图：projection=mercator 时可直接贴到 MapLibre 的 image source。
+// bbox 用数据集经度（0..360）；mask 取 land / ocean。
+export function imageUrl({
+  model,
+  init,
+  variable,
+  lead,
+  bbox,
+  projection = 'mercator',
+  mask = null,
+}) {
+  const query = new URLSearchParams({
+    model,
+    init,
+    var: variable,
+    lead: String(lead),
+    projection,
+  })
+  if (mask) query.set('mask', mask)
+  if (bbox) query.set('bbox', bbox.map((item) => item.toFixed(3)).join(','))
+  return `${BASE}/image?${query}`
+}
+
 export function fetchSeries({ model, init, variable, lat, lon }) {
   const query = new URLSearchParams({
     model,

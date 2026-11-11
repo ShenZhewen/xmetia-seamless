@@ -10,7 +10,7 @@ router = APIRouter(tags=["fields"])
 
 @router.get("/field")
 def field(
-    model: str = Query("fuxi"),
+    model: str = Query("tongyun_c116"),
     init: str = Query(..., pattern=r"^\d{8}(\d{2})?$"),
     var: str = Query("T2M"),
     lead: int = Query(config.STEP_HOURS),
@@ -35,7 +35,7 @@ def field(
 
 @router.get("/series")
 def series(
-    model: str = Query("fuxi"),
+    model: str = Query("tongyun_c116"),
     init: str = Query(..., pattern=r"^\d{8}(\d{2})?$"),
     var: str = Query("T2M"),
     lat: float = Query(..., ge=-90, le=90),

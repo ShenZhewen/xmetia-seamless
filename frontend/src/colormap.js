@@ -172,6 +172,24 @@ function buildLut(interpolate, reverse) {
   return lut
 }
 
+// catalog 的发散色标直接给 11 个离散色，段内线性插值要和后端
+// palettes._interp_rgba 一致，图例颜色才能和服务端出图逐档对齐。
+function buildTableLut(colors) {
+  const lut = new Uint8ClampedArray(LUT_SIZE * 4)
+  for (let i = 0; i < LUT_SIZE; i += 1) {
+    const pos = (i / (LUT_SIZE - 1)) * (colors.length - 1)
+    const index = Math.min(colors.length - 2, Math.floor(pos))
+    const frac = pos - index
+    const lo = colors[index]
+    const hi = colors[index + 1]
+    lut[i * 4] = Math.round(lo[0] + (hi[0] - lo[0]) * frac)
+    lut[i * 4 + 1] = Math.round(lo[1] + (hi[1] - lo[1]) * frac)
+    lut[i * 4 + 2] = Math.round(lo[2] + (hi[2] - lo[2]) * frac)
+    lut[i * 4 + 3] = 255
+  }
+  return lut
+}
+
 function clamp01(value) {
   return value < 0 ? 0 : value > 1 ? 1 : value
 }
@@ -247,12 +265,14 @@ function tickPositions(values, lo, hi) {
     }))
 }
 
-export function createColormap(variable) {
+// palettes：/api/catalog 返回的色标表；给了就优先用，图例和服务端出图同源。
+export function createColormap(variable, palettes = null) {
   const scale = displayScale(variable)
   const offset = displayOffset(variable)
   const lo = variable.range[0]
   const hi = variable.range[1]
-  const key = `${variable.palette ?? variable.id}|${lo}|${hi}|${scale}|${offset}`
+  const catalogPalette = palettes?.[variable.palette] ?? null
+  const key = `${variable.palette ?? variable.id}|${lo}|${hi}|${scale}|${offset}|${catalogPalette ? 'catalog' : 'local'}`
   const hit = cache.get(key)
   if (hit) {
     cache.delete(key)
@@ -260,11 +280,13 @@ export function createColormap(variable) {
     return hit
   }
 
-  const palette = PALETTES[variable.palette] ?? DEFAULT_PALETTE
+  const palette = catalogPalette ?? PALETTES[variable.palette] ?? DEFAULT_PALETTE
   const center = palette.center ?? 0
   const diverging = palette.type === 'diverging' && center > lo && center < hi
   const lut = palette.type === 'diverging'
-    ? buildLut(palette.interpolate, palette.reverse)
+    ? (palette.colors
+        ? buildTableLut(palette.colors)
+        : buildLut(palette.interpolate, palette.reverse))
     : null
 
   let colorFor

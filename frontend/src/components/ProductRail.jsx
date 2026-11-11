@@ -1,15 +1,12 @@
-import { PRODUCTS, RAIN_WINDOWS } from '../products.js'
+import { PRODUCT_BY_ID, RAIN_WINDOWS } from '../products.js'
 
-// 侧栏先只放这些业务产品；products.js 里其余定义保留，
-// 以后要加回来直接往这个数组里加 id 即可。
-const VISIBLE_PRODUCTS = [
-  'rain',
-  'surface',
-  'z500',
-  't850',
-  't2m',
-  'wind',
-  'analysis',
+// 侧栏按业务层次分组：降水 / 地面 / 高空 / 海洋。
+// 产品名称统一成「XX图 / XX场」，不放「温湿风」三合一填色。
+const PRODUCT_GROUPS = [
+  { title: '降水', ids: ['rain'] },
+  { title: '地面', ids: ['surface', 't2m', 'wind', 'tdiff', 'pdiff'] },
+  { title: '高空', ids: ['z500', 't850', 'q850'] },
+  { title: '海洋', ids: ['analysis'] },
 ]
 
 function toggleClass(on) {
@@ -26,24 +23,32 @@ export default function ProductRail({
   barbLevel,
   onBarbLevelChange,
   currentVariable,
+  validTime,
 }) {
   const contoursAvailable = Boolean(currentVariable?.contour)
 
   return (
     <aside className="rail">
       <div className="product-list">
-        {PRODUCTS.filter((product) => VISIBLE_PRODUCTS.includes(product.id)).map(
-          (product) => (
-            <button
-              key={product.id}
-              type="button"
-              className={`product-btn${product.id === productId ? ' is-active' : ''}`}
-              onClick={() => onProductChange(product.id)}
-            >
-              <span className="product-label">{product.label}</span>
-            </button>
-          ),
-        )}
+        {PRODUCT_GROUPS.map((group) => (
+          <div className="product-group" key={group.title}>
+            <div className="rail-title">{group.title}</div>
+            {group.ids.map((id) => {
+              const product = PRODUCT_BY_ID[id]
+              if (!product) return null
+              return (
+                <button
+                  key={product.id}
+                  type="button"
+                  className={`product-btn${product.id === productId ? ' is-active' : ''}`}
+                  onClick={() => onProductChange(product.id)}
+                >
+                  <span className="product-label">{product.label}</span>
+                </button>
+              )
+            })}
+          </div>
+        ))}
       </div>
 
       {productId === 'rain' ? (
@@ -115,6 +120,10 @@ export default function ProductRail({
           <span className="toggle-text">地名标注</span>
         </button>
       </section>
+
+      <div className="rail-time" title="北京时间（UTC+8）">
+        <span className="current-time">{validTime || '—'}</span>
+      </div>
     </aside>
   )
 }

@@ -6,11 +6,13 @@ import ProductRail from './components/ProductRail.jsx'
 import Timeline from './components/Timeline.jsx'
 import TopBar from './components/TopBar.jsx'
 import { fetchCatalog, fetchField, fetchRuns, fetchSeries } from './api.js'
+import { isLand } from './landMask.js'
 import {
   PRODUCT_BY_ID,
   RAIN_WINDOWS,
   productForVariable,
 } from './products.js'
+import { formatValidTime } from './time.js'
 
 const CACHE_LIMIT = 12
 const DETAIL_CACHE_LIMIT = 8
@@ -18,23 +20,6 @@ const WIND_CACHE_LIMIT = 8
 const SERIES_CACHE_LIMIT = 24
 
 const RAIN_IDS = RAIN_WINDOWS.map((item) => item.id)
-
-function pad(value) {
-  return String(value).padStart(2, '0')
-}
-
-function computeValidTime(init, lead) {
-  if (!init) return ''
-  const year = Number(init.slice(0, 4))
-  const month = Number(init.slice(4, 6)) - 1
-  const day = Number(init.slice(6, 8))
-  const hour = init.length >= 10 ? Number(init.slice(8, 10)) : 0
-  const date = new Date(Date.UTC(year, month, day, hour + lead))
-  return (
-    `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-` +
-    `${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:00`
-  )
-}
 
 function trimCache(cache, limit) {
   while (cache.size > limit) {
@@ -130,7 +115,7 @@ function detailRequest(view) {
 export default function App() {
   const [catalog, setCatalog] = useState(null)
   const [runs, setRuns] = useState([])
-  const [model, setModel] = useState(params.get('model') || 'fuxi')
+  const [latestByModel, setLatestByModel] = useState({})
   const [init, setInit] = useState(params.get('init') || '')
   const [productId, setProductId] = useState(INITIAL_PRODUCT.productId)
   const [variableId, setVariableId] = useState(INITIAL_PRODUCT.variable)
@@ -191,11 +176,6 @@ export default function App() {
     fetchCatalog()
       .then((data) => {
         setCatalog(data)
-        setModel((current) =>
-          data.models?.some((item) => item.id === current)
-            ? current
-            : (data.models?.[0]?.id ?? current),
-        )
         setVariableId((current) =>
           data.variables?.some((item) => item.id === current)
             ? current
@@ -205,16 +185,40 @@ export default function App() {
       .catch((err) => setError(err.message))
   }, [])
 
-  // 起报列表
+  // 两个内部档的起报取交集：监听程序保证两档同一起报，过渡窗口里也优先用两边都有的
   useEffect(() => {
+    const models = catalog?.models ?? []
+    if (!models.length) return undefined
     let cancelled = false
-    fetchRuns(model)
-      .then((data) => {
+    Promise.all(
+      models.map((item) =>
+        fetchRuns(item.id)
+          .then((data) => [item.id, data])
+          .catch(() => [item.id, { inits: [] }]),
+      ),
+    )
+      .then((entries) => {
         if (cancelled) return
-        const inits = data.inits ?? []
-        setRuns(inits)
+        const byModel = Object.fromEntries(entries.map(([id, data]) => [id, data.inits ?? []]))
+        const latest = Object.fromEntries(
+          entries.map(([id, data]) => [id, data.latest ?? null]),
+        )
+        setLatestByModel(latest)
+        const counts = new Map()
+        for (const inits of Object.values(byModel)) {
+          for (const value of inits) {
+            counts.set(value, (counts.get(value) ?? 0) + 1)
+          }
+        }
+        const bestCount = Math.max(0, ...counts.values())
+        const best = [...counts.entries()]
+          .filter(([, count]) => count === bestCount)
+          .map(([value]) => value)
+          .sort()
+          .reverse()
+        setRuns(best)
         setInit((current) =>
-          inits.includes(current) ? current : (inits[0] ?? ''),
+          best.includes(current) ? current : (best[0] ?? ''),
         )
       })
       .catch((err) => {
@@ -223,12 +227,35 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [model])
+  }, [catalog])
 
   const variable = useMemo(
     () => catalog?.variables?.find((item) => item.id === variableId),
     [catalog, variableId],
   )
+
+  const sourceModels = useMemo(() => catalog?.models ?? [], [catalog])
+
+  // 单一时效落在哪一档：优先用覆盖它的最短档（前 15 天 6h 档、之后逐日档）
+  const modelForLead = useCallback(
+    (leadHours) => {
+      const covering = sourceModels.filter(
+        (item) => leadHours >= item.lead_min && leadHours <= item.lead_max,
+      )
+      covering.sort((a, b) => a.lead_max - b.lead_max)
+      return covering[0]?.id ?? sourceModels[0]?.id ?? ''
+    },
+    [sourceModels],
+  )
+
+  const model = modelForLead(lead)
+  const modelInfo = latestByModel[model] ?? null
+  const availableFields = useMemo(() => {
+    if (!modelInfo) return null
+    return new Set([...(modelInfo.channels ?? []), ...(modelInfo.derived ?? [])])
+  }, [modelInfo])
+  const variableAvailable =
+    !variable || !availableFields || availableFields.has(variable.field)
 
   // 等压线这类产品只画线不画填色
   const activeProduct = PRODUCT_BY_ID[productId] ?? PRODUCT_BY_ID.custom
@@ -241,13 +268,38 @@ export default function App() {
     [catalog, oceanVarId],
   )
 
+  // 「海洋与地面」点选：海里看海温曲线，陆地上看海平面气压曲线。
+  // 陆海判定用和出图同一张 0.1° Natural Earth 掩膜，避免和海温填色对不上。
+  const seriesVariable = useMemo(() => {
+    if (productId !== 'analysis' || !oceanVariable || pickLat == null) return variable
+    if (isLand(pickLat, pickLon)) return variable
+    const exists = Object.values(latestByModel).some((info) =>
+      [...(info?.channels ?? []), ...(info?.derived ?? [])].includes(
+        oceanVariable.field,
+      ),
+    )
+    return exists ? oceanVariable : variable
+  }, [productId, oceanVariable, variable, pickLat, pickLon, latestByModel])
+  const seriesVariableId = seriesVariable?.id ?? variableId
+
   const minLead = variable?.min_lead ?? catalog?.step_hours ?? 6
   const windVar = barbLevel === '850hPa' ? 'WSPD850' : 'WSPD10'
+  const windAvailable =
+    !availableFields || availableFields.has(windVar === 'WSPD850' ? 'wspd850' : 'wspd10')
 
-  // 产品/要素限制时效：累计量和变化量在窗口不够长时没有值
+  // 产品/要素限制时效：累计量和变化量在窗口不够长时没有值；
+  // 数据源缺这个要素的时段也不放进时间轴（比如风顺暂时只有 Z500）
   const leads = useMemo(
-    () => (catalog?.leads ?? []).filter((value) => value >= minLead),
-    [catalog, minLead],
+    () =>
+      (catalog?.leads ?? []).filter((value) => {
+        if (value < minLead) return false
+        if (!variable) return true
+        const info = latestByModel[modelForLead(value)]
+        if (!info) return true
+        const fields = new Set([...(info.channels ?? []), ...(info.derived ?? [])])
+        return fields.has(variable.field)
+      }),
+    [catalog, minLead, variable, latestByModel, modelForLead],
   )
 
   useEffect(() => {
@@ -260,6 +312,12 @@ export default function App() {
     if (!init) return undefined
     if (lead < minLead) return undefined
     if (runs.length && !runs.includes(init)) return undefined
+    if (!variableAvailable) {
+      setField(null)
+      setLoading(false)
+      setError('')
+      return undefined
+    }
 
     const key = `${model}|${init}|${variableId}|${lead}`
     const cached = cacheRef.current.get(key)
@@ -290,7 +348,7 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [model, init, variableId, lead, minLead, runs, requestField, putCache])
+  }, [model, init, variableId, lead, minLead, runs, variableAvailable, requestField, putCache])
 
   // 换模型/起报/变量/时效时，上一帧的高分辨率块已经对不上，先撤掉
   useEffect(() => {
@@ -303,7 +361,7 @@ export default function App() {
       setDetailField(null)
       return undefined
     }
-    if (!init || lead < minLead) return undefined
+    if (!init || lead < minLead || !variableAvailable) return undefined
     const request = detailRequest(view)
     if (!request) {
       setDetailField(null)
@@ -343,12 +401,12 @@ export default function App() {
       cancelled = true
       clearTimeout(timer)
     }
-  }, [view, playing, model, init, variableId, lead, minLead])
+  }, [view, playing, model, init, variableId, lead, minLead, variableAvailable])
 
   // 风羽用的风速场：和主要素分开取，切主要素不用重新算
   useEffect(() => {
     // 主填色本身就是这个风场时，直接复用当前场，不重复请求
-    if (!overlays.barbs || !init || variableId === windVar) {
+    if (!overlays.barbs || !init || variableId === windVar || !windAvailable) {
       setWindField(null)
       return undefined
     }
@@ -375,11 +433,15 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [overlays.barbs, barbLevel, windVar, model, init, lead, variableId])
+  }, [overlays.barbs, barbLevel, windVar, model, init, lead, variableId, windAvailable])
 
   // 海温叠加场：只有「海洋与地面」产品需要；缺数据时静默跳过，不影响主图
   useEffect(() => {
-    if (!oceanVariable || !init) {
+    if (
+      !oceanVariable ||
+      !init ||
+      (availableFields && !availableFields.has(oceanVariable.field))
+    ) {
       setOceanField(null)
       return undefined
     }
@@ -416,17 +478,18 @@ export default function App() {
     lead,
     runs,
     catalog,
+    availableFields,
     requestField,
     putCache,
   ])
 
-  // 点选格点的逐时效序列：换模型/起报/要素或点新位置都重新取
+  // 点选格点的逐时效序列：两档都取，重叠时段优先用细档，拼成一条 60 天曲线
   useEffect(() => {
-    if (pickLat == null || pickLon == null || !init || !variableId) {
+    if (pickLat == null || pickLon == null || !init || !seriesVariable) {
       setSeries(null)
       return undefined
     }
-    const key = `${model}|${init}|${variableId}|${pickLat}|${pickLon}`
+    const key = `${init}|${seriesVariableId}|${pickLat}|${pickLon}`
     const cache = seriesCacheRef.current
     const cached = cache.get(key)
     if (cached) {
@@ -436,15 +499,51 @@ export default function App() {
       return undefined
     }
 
+    const sources = sourceModels.filter((item) => {
+      const info = latestByModel[item.id]
+      if (!info) return true
+      const fields = new Set([...(info.channels ?? []), ...(info.derived ?? [])])
+      return fields.has(seriesVariable.field)
+    })
+    if (!sources.length) {
+      setSeries({ loading: false, data: null, error: '该要素没有数据' })
+      return undefined
+    }
+
     let cancelled = false
     setSeries({ loading: true, data: null, error: '' })
-    fetchSeries({
-      model,
-      init,
-      variable: variableId,
-      lat: pickLat,
-      lon: pickLon,
-    })
+    Promise.all(
+      sources.map((item) =>
+        fetchSeries({
+          model: item.id,
+          init,
+          variable: seriesVariableId,
+          lat: pickLat,
+          lon: pickLon,
+        })
+          .then((data) => ({ leadMax: item.lead_max, data }))
+          .catch(() => null),
+      ),
+    )
+      .then((results) => {
+        const good = results
+          .filter(Boolean)
+          .sort((a, b) => a.leadMax - b.leadMax)
+        if (!good.length) throw new Error('读取失败')
+        // 细档在前，同一个时效只留第一次出现的点
+        const byLead = new Map()
+        for (const item of good) {
+          for (const point of item.data.points ?? []) {
+            if (!byLead.has(point.lead_hours)) byLead.set(point.lead_hours, point)
+          }
+        }
+        return {
+          points: [...byLead.values()].sort((a, b) => a.lead_hours - b.lead_hours),
+          grid: good.find((item) => item.data.grid?.lat != null)?.data.grid ?? null,
+          window_hours: seriesVariable.window_hours,
+          lag_hours: seriesVariable.lag_hours,
+        }
+      })
       .then((data) => {
         if (cancelled) return
         cache.set(key, data)
@@ -459,7 +558,15 @@ export default function App() {
     return () => {
       cancelled = true
     }
-  }, [pickLat, pickLon, model, init, variableId])
+  }, [
+    pickLat,
+    pickLon,
+    init,
+    seriesVariable,
+    seriesVariableId,
+    sourceModels,
+    latestByModel,
+  ])
 
   // 预取后面两个时效，播放/拖动时间轴时不至于每帧都等网络
   useEffect(() => {
@@ -469,10 +576,16 @@ export default function App() {
     for (const step of [1, 2]) {
       const nextLead = leads[index + step]
       if (nextLead == null) continue
-      const key = `${model}|${init}|${variableId}|${nextLead}`
+      const nextModel = modelForLead(nextLead)
+      const info = latestByModel[nextModel]
+      if (info) {
+        const fields = new Set([...(info.channels ?? []), ...(info.derived ?? [])])
+        if (!variable || !fields.has(variable.field)) continue
+      }
+      const key = `${nextModel}|${init}|${variableId}|${nextLead}`
       if (cacheRef.current.has(key) || requestsRef.current.has(key)) continue
       requestField(key, {
-        model,
+        model: nextModel,
         init,
         variable: variableId,
         lead: nextLead,
@@ -482,7 +595,18 @@ export default function App() {
           /* 预取失败不打扰用户，走到那一步时会正常报错 */
         })
     }
-  }, [model, init, variableId, lead, leads, requestField, putCache])
+  }, [
+    model,
+    init,
+    variableId,
+    variable,
+    lead,
+    leads,
+    latestByModel,
+    modelForLead,
+    requestField,
+    putCache,
+  ])
 
   // 逐时效播放：到最后一个时自动停，不循环回开头
   useEffect(() => {
@@ -541,7 +665,6 @@ export default function App() {
   useEffect(() => {
     if (!init) return
     const query = new URLSearchParams()
-    query.set('model', model)
     query.set('init', init)
     query.set('product', productId)
     query.set('var', variableId)
@@ -554,7 +677,7 @@ export default function App() {
       '',
       `${window.location.pathname}?${query.toString()}`,
     )
-  }, [model, init, productId, variableId, lead, view.lon, view.lat, view.zoom])
+  }, [init, productId, variableId, lead, view.lon, view.lat, view.zoom])
 
   const handleViewChange = useCallback((next) => {
     setView(next)
@@ -614,11 +737,6 @@ export default function App() {
       ? field
       : null
 
-  const validTime =
-    fieldMatches && field.valid_time
-      ? field.valid_time
-      : computeValidTime(init, lead)
-
   // 海温层和主图同模型/起报，换时效时保留上一帧直到新帧到达
   const visibleOceanField =
     oceanField &&
@@ -644,13 +762,14 @@ export default function App() {
       : visibleWindField
     : null
 
+  const validTime = formatValidTime(init, lead, { withYear: false })
+
   return (
     <div className="app">
       <TopBar
-        models={catalog?.models ?? []}
-        model={model}
-        onModelChange={setModel}
-        validTime={validTime}
+        init={init}
+        runs={runs}
+        onInitChange={setInit}
         loading={loading}
       />
 
@@ -665,6 +784,7 @@ export default function App() {
           barbLevel={barbLevel}
           onBarbLevelChange={setBarbLevel}
           currentVariable={variable}
+          validTime={validTime}
         />
 
         <main className="stage">
@@ -684,25 +804,31 @@ export default function App() {
             windField={barbsWindField}
             pick={pick}
             onPick={handlePick}
+            palettes={catalog?.palettes}
           />
-          {showFill && !error ? <Legend variable={variable} /> : null}
+          {showFill && !error ? (
+            <Legend variable={variable} palettes={catalog?.palettes} />
+          ) : null}
           {pick ? (
             <PointSeries
               series={series}
-              model={
-                catalog?.models?.find((item) => item.id === model) ?? null
-              }
-              variable={variable}
+              variable={seriesVariable}
               lead={lead}
               pick={pick}
               onClose={closeSeries}
             />
           ) : null}
           {error ? <div className="error-banner">{error}</div> : null}
+          {!error && !variableAvailable && variable ? (
+            <div className="error-banner">
+              当前数据没有「{variable.label}」，换一个要素看看
+            </div>
+          ) : null}
         </main>
       </div>
 
       <Timeline
+        init={init}
         leads={leads}
         lead={lead}
         onLeadChange={setLead}

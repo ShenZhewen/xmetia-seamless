@@ -3,3 +3,6 @@ uvicorn[standard]>=0.32
 xarray>=2024.10
 numpy>=1.26
 netCDF4>=1.6
+zarr>=2.18,<3
+numcodecs>=0.12
+pillow>=10.0

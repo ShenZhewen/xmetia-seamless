@@ -1,10 +1,10 @@
-export default function TopBar({
-  models,
-  model,
-  onModelChange,
-  validTime,
-  loading,
-}) {
+import { formatValidTime } from '../time.js'
+
+export default function TopBar({ init, runs, onInitChange, loading }) {
+  const options = Array.isArray(runs) ? runs : []
+  const current = init || ''
+  const known = options.includes(current)
+
   return (
     <header className="topbar">
       <div className="brand">
@@ -12,27 +12,26 @@ export default function TopBar({
         <div className="brand-name">xmetai-seamless</div>
       </div>
 
-      <label className="model-select">
-        <span className="model-select-label">预报模型</span>
-        <select
-          value={model}
-          onChange={(event) => onModelChange(event.target.value)}
-          aria-label="预报模型"
-        >
-          {models.map((item) => (
-            <option key={item.id} value={item.id}>
-              {item.label}
-            </option>
-          ))}
-        </select>
-      </label>
-
       <div className="topbar-right">
-        <div className="valid-time">
-          <span className="valid-value">
-            {validTime ? `${validTime} UTC` : '—'}
-          </span>
-        </div>
+        <label className="init-picker" title="起报时间（北京时间）">
+          <span className="init-label">起报日</span>
+          <select
+            value={current}
+            onChange={(event) => onInitChange(event.target.value)}
+            disabled={options.length === 0}
+            aria-label="起报日"
+          >
+            {current && !known ? (
+              <option value={current}>{formatValidTime(current)}</option>
+            ) : null}
+            {!current && options.length === 0 ? <option value="">—</option> : null}
+            {options.map((value) => (
+              <option key={value} value={value}>
+                {formatValidTime(value)}
+              </option>
+            ))}
+          </select>
+        </label>
         {loading ? <span className="top-loading">同步中</span> : null}
       </div>
     </header>

@@ -1,11 +1,11 @@
 # -*- coding: utf-8 -*-
-"""业务层：目录信息、起报列表、单场查询（带进程内缓存）。
+"""业务层：目录信息、起报列表、单场/点时序查询（读 data_store 的 Zarr）。
 
 变量分四类（见 config.VARIABLES 的 kind）：
-  raw    直接读文件
-  wind   两个分量合成风速，并附带 u/v 给前端画风羽
-  accum  把 6h 降水累加成 24/48/72h
-  diff   当前时效减去 24h 前的值（变温 / 变压）
+  raw    直接读一个规范通道
+  wind   两个分量合成风速并附带 u/v 给前端画风羽
+  accum  读入库时算好的 24/48/72h 累计降水
+  diff   读入库时算好的 24h 变温 / 变压
 """
 from __future__ import annotations
 
@@ -16,22 +16,61 @@ from typing import Dict
 
 import numpy as np
 
-from app.core import config
-from app.data.forecast_store import ForecastStore
+from app.core import config, palettes
+from app.data.zarr_store import ZarrStore
 
 _STORES = {
-    name: ForecastStore(root, config.STEP_HOURS, config.MAX_LEAD_INDEX)
-    for name, root in config.FORECAST_SOURCES.items()
+    name: ZarrStore(name, step_hours=spec["step_hours"],
+                    max_lead_index=spec["max_lead_index"])
+    for name, spec in config.MODELS.items()
 }
 
 _VAR_BY_ID = {item["id"].upper(): item for item in config.VARIABLES}
 
 
-def _get_store(model: str) -> ForecastStore:
+def _get_store(model: str) -> ZarrStore:
     try:
         return _STORES[model]
     except KeyError:
         raise KeyError("未知模型 %r，可用: %s" % (model, sorted(_STORES)))
+
+
+def require_run(model: str, init: str) -> ZarrStore:
+    """确认模型已配置、起报已发布；给其它服务（出图）复用。"""
+    store = _get_store(model)
+    store.manifest(init)
+    return store
+
+
+def variable_meta(var: str) -> tuple:
+    var_id = _validate_var(var)
+    return var_id, _VAR_BY_ID[var_id]
+
+
+def validate_lead(store: ZarrStore, init: str, lead_hours: int,
+                  meta: Dict | None = None) -> None:
+    """按该起报 manifest 里实际写出的时效校验；两段步长不同（6h / 24h）。"""
+    manifest = store.manifest(init)
+    leads = manifest.get("leads", [])
+    if int(lead_hours) not in leads:
+        step = manifest.get("step_hours", config.STEP_HOURS)
+        if leads:
+            raise ValueError(
+                "该起报没有 %dh 时效，可用 %dh..%dh（步长 %dh）"
+                % (lead_hours, leads[0], leads[-1], step)
+            )
+        raise ValueError("该起报没有可用时效")
+    min_lead = int((meta or {}).get("min_lead", manifest.get("step_hours", config.STEP_HOURS)))
+    if lead_hours < min_lead:
+        raise ValueError(
+            "%s 需要时效 ≥%dh（当前 %dh）"
+            % ((meta or {}).get("label", "该产品"), min_lead, lead_hours)
+        )
+
+
+def _model_leads(spec: Dict) -> list:
+    return [index * int(spec["step_hours"])
+            for index in range(1, int(spec["max_lead_index"]) + 1)]
 
 
 def get_catalog() -> Dict:
@@ -42,24 +81,43 @@ def get_catalog() -> Dict:
         # 分级色标默认不参与自适应；没写 adaptive 的连续色标可以自适应
         row.setdefault("adaptive", True)
         variables.append(row)
+    models = []
+    for name, spec in config.MODELS.items():
+        leads = _model_leads(spec)
+        models.append({
+            "id": name,
+            "label": spec["label"],
+            "step_hours": int(spec["step_hours"]),
+            "lead_min": leads[0],
+            "lead_max": leads[-1],
+            "leads": leads,
+        })
+    # 两段时效取并集：24..360h 同时属于两档，但 6h 细档已经把这段覆盖了
+    leads = sorted({lead for item in models for lead in item["leads"]})
     return {
-        "models": [
-            {"id": name, "label": config.MODEL_LABELS.get(name, name)}
-            for name in _STORES
-        ],
+        "models": models,
         "variables": variables,
-        "leads": [
-            index * config.STEP_HOURS
-            for index in range(1, config.MAX_LEAD_INDEX + 1)
-        ],
+        "leads": leads,
         "step_hours": config.STEP_HOURS,
+        **palettes.catalog_palettes(),
     }
 
 
 def list_runs(model: str, limit: int) -> Dict:
     store = _get_store(model)
     inits = store.list_inits()
-    return {"model": model, "total": len(inits), "inits": inits[:limit]}
+    result = {"model": model, "total": len(inits), "inits": inits[:limit]}
+    if inits:
+        manifest = store.manifest(inits[0])
+        result["latest"] = {
+            "init": inits[0],
+            "step_hours": manifest.get("step_hours"),
+            "leads": manifest.get("leads", []),
+            "channels": [item["name"] for item in manifest.get("channels", [])],
+            "derived": manifest.get("derived", []),
+            "grid": manifest.get("grid"),
+        }
+    return result
 
 
 def get_field(
@@ -70,10 +128,10 @@ def get_field(
     stride: int,
     bbox: tuple | None = None,
 ) -> Dict:
-    """单场查询。参数不合法抛 ValueError，文件缺失抛 FileNotFoundError。"""
-    _get_store(model)
+    """单场查询。参数不合法抛 ValueError，起报/变量缺失抛 FileNotFoundError/KeyError。"""
+    store = _get_store(model)
     var_id = _validate_var(var)
-    _validate_lead(lead_hours, _VAR_BY_ID[var_id])
+    validate_lead(store, init, lead_hours, _VAR_BY_ID[var_id])
     if not (1 <= stride <= config.MAX_STRIDE):
         raise ValueError("stride 必须在 1..%d 之间" % config.MAX_STRIDE)
     if bbox is not None:
@@ -93,25 +151,13 @@ def _validate_var(var: str) -> str:
     return var_id
 
 
-def _validate_lead(lead_hours: int, meta: Dict | None = None) -> None:
-    if lead_hours % config.STEP_HOURS != 0 or not (
-        config.STEP_HOURS <= lead_hours <= config.MAX_LEAD_INDEX * config.STEP_HOURS
-    ):
-        raise ValueError(
-            "时效必须是 %d 的倍数，且在 %d..%d 之间"
-            % (config.STEP_HOURS, config.STEP_HOURS,
-               config.MAX_LEAD_INDEX * config.STEP_HOURS)
-        )
-    min_lead = int((meta or {}).get("min_lead", config.STEP_HOURS))
-    if lead_hours < min_lead:
-        raise ValueError(
-            "%s 需要时效 ≥ %dh（当前 %dh）"
-            % ((meta or {}).get("label", "该产品"), min_lead, lead_hours)
-        )
+def _missing_var_message(var: str, meta: Dict | None = None) -> str:
+    label = (meta or {}).get("label", var)
+    return "当前数据没有 %s（%s）变量，等数据接入后再看" % (var, label)
 
 
 def _derived_values(
-    store: ForecastStore,
+    store: ZarrStore,
     init: str,
     meta: Dict,
     lead_hours: int,
@@ -120,69 +166,37 @@ def _derived_values(
 ) -> Dict:
     """返回 values/lat/lon 以及 wind 的 u/v、累加窗口等附加信息。"""
     kind = meta.get("kind", "raw")
-
-    if kind == "wind":
-        u = store.read_field(init, meta["sources"][0], lead_hours, stride, bbox)
-        v = store.read_field(init, meta["sources"][1], lead_hours, stride, bbox)
-        values = np.hypot(u["values"], v["values"]).astype("f4")
-        return {
-            "lat": u["lat"],
-            "lon": u["lon"],
-            "values": values,
-            "u": u["values"],
-            "v": v["values"],
-            "source_vars": list(meta["sources"]),
-        }
-
-    if kind == "accum":
-        window = int(meta["window_hours"])
-        parts = []
-        first = None
-        for offset in range(window - config.STEP_HOURS, -1, -config.STEP_HOURS):
-            part = store.read_field(
-                init, meta["source"], lead_hours - offset, stride, bbox
-            )
-            if first is None:
-                first = part
-            parts.append(part["values"])
-        # 任何一个时次缺测都保持 NaN，避免把不完整的窗口当成累计值
-        values = np.sum(np.stack(parts, axis=0), axis=0, dtype="f4")
-        return {
-            "lat": first["lat"],
-            "lon": first["lon"],
-            "values": values,
-            "source_vars": [meta["source"]],
-            "window_hours": window,
-        }
-
-    if kind == "diff":
-        lag = int(meta["lag_hours"])
-        current = store.read_field(init, meta["source"], lead_hours, stride, bbox)
-        earlier = store.read_field(init, meta["source"], lead_hours - lag, stride, bbox)
-        values = (current["values"] - earlier["values"]).astype("f4")
-        return {
-            "lat": current["lat"],
-            "lon": current["lon"],
-            "values": values,
-            "source_vars": [meta["source"]],
-            "lag_hours": lag,
-        }
-
     try:
-        raw = store.read_field(init, meta["id"], lead_hours, stride, bbox)
+        if kind == "wind":
+            u = store.read_field(init, meta["source_fields"][0], lead_hours,
+                                 stride, bbox)
+            v = store.read_field(init, meta["source_fields"][1], lead_hours,
+                                 stride, bbox)
+            values = np.hypot(u["values"], v["values"]).astype("f4")
+            return {
+                "lat": u["lat"],
+                "lon": u["lon"],
+                "values": values,
+                "u": u["values"],
+                "v": v["values"],
+                "source_vars": list(meta["sources"]),
+            }
+
+        raw = store.read_field(init, meta["field"], lead_hours, stride, bbox)
     except KeyError as exc:
         raise ValueError(_missing_var_message(meta["id"], meta)) from exc
-    return {
+
+    result = {
         "lat": raw["lat"],
         "lon": raw["lon"],
         "values": raw["values"],
-        "source_vars": [meta["id"]],
+        "source_vars": [meta.get("source", meta["id"])],
     }
-
-
-def _missing_var_message(var: str, meta: Dict | None = None) -> str:
-    label = (meta or {}).get("label", var)
-    return "当前数据没有 %s（%s）变量，等数据接入后再看" % (var, label)
+    if kind == "accum":
+        result["window_hours"] = int(meta["window_hours"])
+    if kind == "diff":
+        result["lag_hours"] = int(meta["lag_hours"])
+    return result
 
 
 @lru_cache(maxsize=config.FIELD_CACHE_SIZE)
@@ -242,71 +256,35 @@ def get_series(model: str, init: str, var: str, lat: float, lon: float) -> Dict:
         raise ValueError(_missing_var_message(var_id, _VAR_BY_ID.get(var_id))) from exc
 
 
-def _read_point_pair(
-    store: ForecastStore, init: str, var: str, lead: int, lat: float, lon: float
-) -> tuple:
-    hit = store.read_point(init, var, lead, lat, lon)
-    return hit["value"], (hit["lat"], hit["lon"])
-
-
 @lru_cache(maxsize=config.SERIES_CACHE_SIZE)
 def _cached_series(model: str, init: str, var: str, lat: float, lon: float) -> Dict:
     store = _get_store(model)
     meta = _VAR_BY_ID[var]
+    manifest = store.manifest(init)
     kind = meta.get("kind", "raw")
-    leads = [index * config.STEP_HOURS
-             for index in range(1, config.MAX_LEAD_INDEX + 1)]
+    leads = list(manifest["leads"])
     grid = {"lat": None, "lon": None}
 
-    def remember_grid(pair):
-        if grid["lat"] is None and pair:
-            grid["lat"] = round(float(pair[0]), 4)
-            grid["lon"] = round(float(pair[1]), 4)
+    def remember_grid(hit):
+        if grid["lat"] is None:
+            grid["lat"] = round(float(hit["lat"]), 4)
+            grid["lon"] = round(float(hit["lon"]), 4)
 
-    # 先按基础变量把 60 个时次读一遍，派生量在内存里算，避免重复开文件
     if kind == "wind":
-        source_u, source_v = meta["sources"]
-        values = []
-        for lead in leads:
-            hit = store.read_points(init, meta["sources"], lead, lat, lon)
-            remember_grid((hit["lat"], hit["lon"]))
-            u = hit["values"][source_u]
-            v = hit["values"][source_v]
-            values.append(None if (u is None or v is None) else math.hypot(u, v))
-    elif kind in ("accum", "diff"):
-        base = []
-        for lead in leads:
-            value, pair = _read_point_pair(store, init, meta["source"], lead, lat, lon)
-            remember_grid(pair)
-            base.append(value)
-        if kind == "accum":
-            steps = int(meta["window_hours"]) // config.STEP_HOURS
-            values = []
-            for index in range(len(base)):
-                if index < steps - 1 or any(v is None for v in base[index - steps + 1:index + 1]):
-                    values.append(None)
-                else:
-                    values.append(sum(base[index - steps + 1:index + 1]))
-        else:
-            lag_steps = int(meta["lag_hours"]) // config.STEP_HOURS
-            values = []
-            for index in range(len(base)):
-                if index < lag_steps or base[index] is None or base[index - lag_steps] is None:
-                    values.append(None)
-                else:
-                    values.append(base[index] - base[index - lag_steps])
+        u = store.read_point_series(init, meta["source_fields"][0], lat, lon)
+        v = store.read_point_series(init, meta["source_fields"][1], lat, lon)
+        remember_grid(u)
+        values = np.hypot(u["values"], v["values"])
     else:
-        values = []
-        for lead in leads:
-            value, pair = _read_point_pair(store, init, meta["id"], lead, lat, lon)
-            remember_grid(pair)
-            values.append(value)
+        hit = store.read_point_series(init, meta["field"], lat, lon)
+        remember_grid(hit)
+        values = hit["values"]
 
     points = [
         {
             "lead_hours": lead,
             "valid_time": _valid_time(init, lead),
-            "value": None if value is None else round(float(value), 2),
+            "value": None if not math.isfinite(value) else round(float(value), 2),
         }
         for lead, value in zip(leads, values)
     ]

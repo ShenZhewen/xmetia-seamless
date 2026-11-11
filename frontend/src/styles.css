@@ -139,16 +139,38 @@ button {
   gap: 16px;
 }
 
-.valid-time {
+.init-picker {
   display: flex;
-  flex-direction: column;
-  gap: 2px;
+  align-items: center;
+  gap: 8px;
 }
 
-.valid-value {
-  font-size: 12px;
-  font-variant-numeric: tabular-nums;
+.init-label {
+  font-size: 13px;
+  letter-spacing: 0.5px;
+  color: var(--muted-2);
+}
+
+.init-picker select {
+  min-width: 148px;
+  padding: 6px 9px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: #0c1524;
   color: var(--text);
+  font-size: 12.5px;
+  font-variant-numeric: tabular-nums;
+  outline: none;
+  cursor: pointer;
+}
+
+.init-picker select:focus {
+  border-color: var(--accent);
+}
+
+.init-picker select:disabled {
+  color: var(--muted);
+  cursor: default;
 }
 
 .top-loading {
@@ -188,10 +210,16 @@ button {
 .rail {
   width: 218px;
   flex: none;
+  display: flex;
+  flex-direction: column;
   padding: 10px 8px;
   overflow-y: auto;
   background: var(--panel);
   border-right: 1px solid var(--border);
+}
+
+.rail > * {
+  flex: none;
 }
 
 .product-list {
@@ -199,6 +227,18 @@ button {
   flex-direction: column;
   gap: 2px;
   padding: 8px 0 4px;
+}
+
+.product-group {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+}
+
+.product-group + .product-group {
+  margin-top: 8px;
+  padding-top: 8px;
+  border-top: 1px solid var(--border);
 }
 
 .product-btn {
@@ -247,6 +287,24 @@ button {
   font-size: 10px;
   letter-spacing: 0.14em;
   color: var(--muted-2);
+}
+
+.rail-time {
+  margin-top: auto;
+  padding: 10px 10px 0;
+  border-top: 1px solid var(--border);
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+}
+
+.current-time {
+  font-size: 20px;
+  line-height: 1.1;
+  font-weight: 500;
+  color: #e9f2ff;
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
 }
 
 .segmented {
@@ -663,7 +721,7 @@ button {
 }
 
 .series-title {
-  font-size: 12.5px;
+  font-size: 14px;
   font-weight: 600;
 }
 
@@ -677,7 +735,7 @@ button {
 .series-meta {
   margin-top: 2px;
   color: var(--muted-2);
-  font-size: 10.5px;
+  font-size: 12px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -714,7 +772,7 @@ button {
 
 .series-axis {
   fill: var(--muted);
-  font-size: 10px;
+  font-size: 12.5px;
   font-variant-numeric: tabular-nums;
 }
 
@@ -737,21 +795,21 @@ button {
 
 .series-dot-label {
   fill: var(--text);
-  font-size: 10.5px;
+  font-size: 12.5px;
   font-variant-numeric: tabular-nums;
 }
 
 .series-empty {
   padding: 34px 0;
   color: var(--muted-2);
-  font-size: 12px;
+  font-size: 13px;
   text-align: center;
 }
 
 .series-foot {
   margin-top: 2px;
   color: var(--muted-2);
-  font-size: 10.5px;
+  font-size: 12px;
   text-align: right;
 }
 
@@ -875,7 +933,7 @@ button {
   left: 0;
   right: 0;
   height: 20px;
-  font-size: 16px;
+  font-size: 12px;
   color: var(--muted);
   font-variant-numeric: tabular-nums;
 }
@@ -969,6 +1027,7 @@ button {
   .rail {
     width: auto;
     display: flex;
+    flex-direction: row;
     align-items: center;
     gap: 8px;
     padding: 8px;
@@ -987,6 +1046,21 @@ button {
     flex: none;
     gap: 3px;
     padding: 0;
+  }
+
+  .product-group {
+    flex-direction: row;
+    flex: none;
+    align-items: center;
+    gap: 3px;
+  }
+
+  .product-group + .product-group {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+    padding-left: 8px;
+    border-left: 1px solid var(--border);
   }
 
   .product-btn {
@@ -1040,5 +1114,21 @@ button {
   .timeline {
     gap: 10px;
     padding: 0 10px;
+  }
+
+  .slider-ticks {
+    font-size: 10px;
+  }
+
+  .rail-time {
+    margin: 0;
+    padding: 0 6px 0 10px;
+    border-top: 0;
+    border-left: 1px solid var(--border);
+    flex: none;
+  }
+
+  .current-time {
+    font-size: 14px;
   }
 }

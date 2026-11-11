@@ -23,11 +23,11 @@ import {
 import {
   MAX_LAT,
   fieldContains,
-  renderFieldImage,
   sampleFieldValue,
   sampleFieldValueSmooth,
   toMapLon,
 } from '../fieldImage.js'
+import { imageUrl } from '../api.js'
 import { isLand, landMaskReady } from '../landMask.js'
 import { buildContours } from '../contours.js'
 import { drawWindBarbs } from '../windBarbs.js'
@@ -72,15 +72,35 @@ const POLAR_CAP_INNER_LAT = 84.55
 const POLAR_CAP_SECTOR = 1
 const POLAR_CAP_OCEAN = '#050a12'
 
-function polarCapData(field, variable, landOnly = false) {
-  const cmap = field && variable ? createColormap(variable) : null
+function polarCapData(
+  field,
+  variable,
+  landOnly = false,
+  palettes = null,
+  oceanField = null,
+  oceanVariable = null,
+) {
+  const cmap = field && variable ? createColormap(variable, palettes) : null
+  const oceanCmap =
+    oceanField && oceanVariable
+      ? createColormap(oceanVariable, palettes)
+      : null
   const colorAt = (lat, lon) => {
     if (!cmap) return POLAR_CAP_OCEAN
     const sign = lat < 0 ? -1 : 1
     // 取极冠内侧边缘（84.55°）的颜色，和贴图边缘接上；缺测时往里退两档
     for (const probe of [POLAR_CAP_INNER_LAT, 84.2, 83.4]) {
       const probeLat = sign * probe
-      if (landOnly && !isLand(probeLat, lon)) return POLAR_CAP_OCEAN
+      const isOceanSector = landOnly && !isLand(probeLat, lon)
+      // 海洋与地面：海面用海温层，没有海温数据时才留底色
+      if (isOceanSector) {
+        if (!oceanCmap) return POLAR_CAP_OCEAN
+        const value = sampleFieldValueSmooth(oceanField, probeLat, lon)
+        if (value == null) continue
+        const rgba = oceanCmap.rgba(toDisplay(value, oceanVariable))
+        if (!rgba || rgba[3] === 0) return POLAR_CAP_OCEAN
+        return `rgb(${rgba[0]},${rgba[1]},${rgba[2]})`
+      }
       const value = sampleFieldValueSmooth(field, probeLat, lon)
       if (value == null) continue
       const rgba = cmap.rgba(toDisplay(value, variable))
@@ -309,6 +329,19 @@ function formatValue(value, variable) {
   return `${text}${unit ? ` ${unit}` : ''}`
 }
 
+// 地区块在数据集坐标（经度 0..360）下的范围；服务端按这个 bbox 出图。
+function detailBox(detailField) {
+  const lats = detailField.lat
+  const lons = detailField.lon
+  if (!lats?.length || !lons?.length) return null
+  return [
+    Math.min(lons[0], lons[lons.length - 1]),
+    Math.min(lats[0], lats[lats.length - 1]),
+    Math.max(lons[0], lons[lons.length - 1]),
+    Math.max(lats[0], lats[lats.length - 1]),
+  ]
+}
+
 function detailGeometry(detailField) {
   const lats = detailField.lat
   const lons = detailField.lon
@@ -320,14 +353,26 @@ function detailGeometry(detailField) {
   // 跨日界线的块 MapLibre 贴不好，宁可退回全球图
   if (!(east > west) || !(north > south)) return null
   return {
-    bounds: { west, south, east, north },
-    coordinates: [
+    coords: [
       [west, north],
       [east, north],
       [east, south],
       [west, south],
     ],
   }
+}
+
+// 后端出图 URL：和 JSON 场同模型/起报/变量/时效，bbox 用数据集经度。
+function fieldImageUrl(source, { bbox = null, mask = null } = {}) {
+  return imageUrl({
+    model: source.model,
+    init: source.init,
+    variable: source.var,
+    lead: source.lead_hours,
+    bbox,
+    mask,
+    projection: 'mercator',
+  })
 }
 
 export default function FieldMap({
@@ -346,6 +391,7 @@ export default function FieldMap({
   windField = null,
   pick = null,
   onPick = null,
+  palettes = null,
 }) {
   const containerRef = useRef(null)
   const mapRef = useRef(null)
@@ -1012,8 +1058,9 @@ export default function FieldMap({
     map.setLayoutProperty('contour-emphasis', 'visibility', visibility)
   }, [contours, showContours, mapReady])
 
-  // ── 全球场图 → Mercator 图片 → MapLibre image source ──
-  // MapLibre 6 的 ImageSource.updateImage 可以直接吃 ImageData，不用转 PNG/Blob。
+  // ── 全球场图 → 后端 Mercator WebP → MapLibre image source ──
+  // 填色由后端按 /api/image 出图（缓存一年），前端只负责贴到 ±85.05° 的世界范围；
+  // 等值线、风羽、读数和极冠仍然吃 JSON 场。
   useEffect(() => {
     const map = mapRef.current
     if (!map || !mapReady) return
@@ -1024,18 +1071,29 @@ export default function FieldMap({
     try {
       // 分级色标用最近邻，保留业务分级边界；连续色带用线性插值
       const resampling =
-        createColormap(variable).kind === 'classes' ? 'nearest' : 'linear'
+        createColormap(variable, palettes).kind === 'classes'
+          ? 'nearest'
+          : 'linear'
       map.setPaintProperty('field-layer', 'raster-resampling', resampling)
-      source.setCoordinates(WORLD_COORDS)
       const capSource = map.getSource('polar-cap')
       // 海洋与地面产品：主填色（地面气压）只铺陆地，海面留给海温层
       const landOnly = Boolean(oceanVariable)
       if (showFill) {
         source.updateImage({
-          image: renderFieldImage(field, variable, null, landOnly ? isLand : null),
+          url: fieldImageUrl(field, { mask: landOnly ? 'land' : null }),
+          coordinates: WORLD_COORDS,
         })
         if (capSource) {
-          capSource.setData(polarCapData(field, variable, landOnly))
+          capSource.setData(
+            polarCapData(
+              field,
+              variable,
+              landOnly,
+              palettes,
+              landOnly ? oceanField : null,
+              landOnly ? oceanVariable : null,
+            ),
+          )
         }
       } else if (capSource) {
         capSource.setData(polarCapData(null, null))
@@ -1048,7 +1106,16 @@ export default function FieldMap({
     } catch (error) {
       /* 绘制失败时保留上一帧；请求错误由 App 统一提示 */
     }
-  }, [field, variable, oceanVariable, showFill, mapReady, maskReady])
+  }, [
+    field,
+    variable,
+    oceanField,
+    oceanVariable,
+    showFill,
+    mapReady,
+    maskReady,
+    palettes,
+  ])
 
   // ── 放大后的地区块 ──
   useEffect(() => {
@@ -1061,22 +1128,23 @@ export default function FieldMap({
       detailField && variable && detailField.var === variable.id && showFill
         ? detailGeometry(detailField)
         : null
-    if (!geometry) {
+    const box = detailField ? detailBox(detailField) : null
+    if (!geometry || !box) {
       map.setLayoutProperty('field-detail-layer', 'visibility', 'none')
       return
     }
     try {
       const resampling =
-        createColormap(variable).kind === 'classes' ? 'nearest' : 'linear'
+        createColormap(variable, palettes).kind === 'classes'
+          ? 'nearest'
+          : 'linear'
       map.setPaintProperty('field-detail-layer', 'raster-resampling', resampling)
-      source.setCoordinates(geometry.coordinates)
       source.updateImage({
-        image: renderFieldImage(
-          detailField,
-          variable,
-          geometry.bounds,
-          oceanVariable ? isLand : null,
-        ),
+        url: fieldImageUrl(detailField, {
+          bbox: box,
+          mask: oceanVariable ? 'land' : null,
+        }),
+        coordinates: geometry.coords,
       })
       map.setLayoutProperty('field-detail-layer', 'visibility', 'visible')
       if (detailField.lead_hours !== field?.lead_hours) {
@@ -1093,6 +1161,7 @@ export default function FieldMap({
     showFill,
     mapReady,
     maskReady,
+    palettes,
   ])
 
   // ── 海温叠加层（海洋与地面产品） ──
@@ -1112,22 +1181,19 @@ export default function FieldMap({
     }
     try {
       const resampling =
-        createColormap(oceanVariable).kind === 'classes' ? 'nearest' : 'linear'
+        createColormap(oceanVariable, palettes).kind === 'classes'
+          ? 'nearest'
+          : 'linear'
       map.setPaintProperty('ocean-field-layer', 'raster-resampling', resampling)
-      source.setCoordinates(WORLD_COORDS)
       source.updateImage({
-        image: renderFieldImage(
-          oceanField,
-          oceanVariable,
-          null,
-          (lat, lon) => !isLand(lat, lon),
-        ),
+        url: fieldImageUrl(oceanField, { mask: 'ocean' }),
+        coordinates: WORLD_COORDS,
       })
       map.setLayoutProperty('ocean-field-layer', 'visibility', 'visible')
     } catch (error) {
       map.setLayoutProperty('ocean-field-layer', 'visibility', 'none')
     }
-  }, [oceanField, oceanVariable, showFill, mapReady, maskReady])
+  }, [oceanField, oceanVariable, showFill, mapReady, maskReady, palettes])
 
   // 没有可用场（或场还是上一个变量）时把图层藏起来，别让旧场冒充当前变量
   useEffect(() => {

@@ -4,6 +4,11 @@ const WIDTH = 560
 const HEIGHT = 224
 const PAD = { left: 50, right: 18, top: 16, bottom: 28 }
 
+function formatLead(leadHours) {
+  if (leadHours % 24 === 0) return `+${leadHours / 24}天`
+  return `+${Math.floor(leadHours / 24)}天${leadHours % 24}h`
+}
+
 function formatCoord(lat, lon) {
   // 数据集经度是 0..360，显示时统一折回 -180..180
   const wrapped = ((((lon + 180) % 360) + 360) % 360) - 180
@@ -61,7 +66,6 @@ function seriesStats(data, variable) {
 
 export default function PointSeries({
   series,
-  model,
   variable,
   lead,
   pick,
@@ -105,7 +109,7 @@ export default function PointSeries({
     )
     for (const index of indexes) {
       const point = points[index]
-      if (point) xTicks.push({ label: `${point.lead_hours}h`, pos: x(point.lead_hours) })
+      if (point) xTicks.push({ label: formatLead(point.lead_hours), pos: x(point.lead_hours) })
     }
   }
 
@@ -124,10 +128,7 @@ export default function PointSeries({
     <section className="series-drawer" aria-label="格点逐时效曲线">
       <header className="series-head">
         <div>
-          <div className="series-title">
-            逐时效曲线 · {variable?.label ?? ''}
-            {model?.label ? <span className="series-model">{model.label}</span> : null}
-          </div>
+          <div className="series-title">{variable?.label ?? ''}</div>
           <div className="series-meta">
             {stats?.grid
               ? `最近格点 ${formatCoord(stats.grid.lat, stats.grid.lon)}`
@@ -232,7 +233,7 @@ export default function PointSeries({
 
       <footer className="series-foot">
         {currentPoint
-          ? `+${lead}h：${
+          ? `${formatLead(lead)}：${
               currentShown != null
                 ? `${formatTick(currentShown)}${unit ? ` ${unit}` : ''}`
                 : '该时效无值'

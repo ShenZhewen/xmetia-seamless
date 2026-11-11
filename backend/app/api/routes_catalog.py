@@ -14,7 +14,7 @@ def catalog():
 
 @router.get("/runs")
 def runs(
-    model: str = Query("fuxi"),
+    model: str = Query("tongyun_c116"),
     limit: int = Query(100, ge=1, le=2000),
 ):
     try:
